@@ -19,18 +19,25 @@ Multi-participant gaming servers often mix languages. This project fine-tunes a 
 
 ## Benchmark
 
-Results from [`tools/compare_models.py`](tools/compare_models.py) across 5 test cases:
+Results from [`tools/compare_models.py`](tools/compare_models.py) across 8 test cases (4 DE→EN, 4 EN→DE):
 
-| Model | Protocol Adherence | Lang Detection | Glossary Mapping | Avg Latency |
-|---|---|---|---|---|
-| **Base Qwen 0.5B (untuned)** | Failed (hallucinates format) | Wrong | None | ~2,100ms |
-| **Fine-tuned Qwen 0.5B (ours)** | 100% strict | 100% | Ansturm→Rush, LoW→Legend of War | ~1,200ms CPU / <15ms KV cache |
-| Cerebras Qwen 3.8 27B (cloud) | 100% (thinking=off) | 100% | Partial (no LoW expansion) | **~260ms** (>1500 tok/s) |
-| Gemini 3.5 Flash Lite (cloud) | Includes timestamp echo | 100% | Partial | ~600ms |
-| InclusionAI Ling 3.0 Flash (cloud) | 100% (thinking=off) | 100% | Partial | ~750ms |
-| Liquid LFM 2.5 2.6B (cloud) | Inconsistent (reasoning spill) | 100% | None | ~2,300ms |
+| Model | Host / Provider | Protocol Adherence | Lang Detection | Glossary / Slang Mapping | Avg Latency |
+|---|---|---|---|---|---|
+| **Base Qwen 0.5B (untuned)** | Local CPU (BF16) | ❌ Failed (hallucinates format) | ❌ Wrong | None | ~2,500ms |
+| **Fine-Tuned Qwen 0.5B (ours)** | Local CPU (BF16) |  **100% Strict** |  100% |  `Ansturm`→`Rush`, `LoW`→`Legend of War`, `wipe`→`wipen` | ~1,500ms CPU / **<15ms KV cache** |
+| Cerebras Qwen 3.8 27B | Cerebras WSE-3 |  **100% Strict** |  100% |  Accurate gaming slang (`wipen`, `Chest-Room`) | **~280ms** (>1500 tok/s) |
+| Gemini 3.5 Flash Lite | Google AI Studio |  100% (echoes speaker tag) |  100% |  Accurate conversational gaming German | ~680ms |
+| Gemini 3.1 Flash Lite | Google AI Studio |  100% (echoes speaker tag) |  100% |  Accurate | ~1,800ms |
+| Gemini 3.5 / 3.7 / 3.8 Flash | Google AI Studio |  High |  100% |  Detailed comprehension | ~1,200ms – 6,000ms (thinking overhead) |
+| Gemma 4 (26B / 31B) | Google AI Studio | ⚠️ Verbose CoT before output |  100% |  Strong domain comprehension | ~9,000ms – 14,000ms |
+| InclusionAI Ling 3.0 Flash | OpenRouter (free) |  **100% Strict** |  100% |  Good (`LK`→`Advanced Math Course`) | ~950ms |
+| Liquid LFM 2.5 2.6B | OpenRouter (free) | ⚠️ Inconsistent (reasoning spill) |  100% | None | ~3,500ms |
 
 Sample output (fine-tuned model):
+```
+Input:  [18.12.2024][15:10:41] [Moritzwied]: Damn das neue schwimmen is so aids für die LoW version
+Output: src: de
+        en: Damn, the new swimming is so aids for the Legend of War version
 ```
 Input:  [18.12.2024][15:10:41] [Moritzwied]: Damn das neue schwimmen is so aids für die LoW version
 Output: src: de
