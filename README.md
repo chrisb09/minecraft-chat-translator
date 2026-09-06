@@ -23,11 +23,12 @@ Results from [`tools/compare_models.py`](tools/compare_models.py) across 5 test 
 
 | Model | Protocol Adherence | Lang Detection | Glossary Mapping | Avg Latency |
 |---|---|---|---|---|
-| **Base Qwen 0.5B (untuned)** | Failed (hallucinates format) | Wrong | None | ~2,000ms |
+| **Base Qwen 0.5B (untuned)** | Failed (hallucinates format) | Wrong | None | ~2,100ms |
 | **Fine-tuned Qwen 0.5B (ours)** | 100% strict | 100% | Ansturm→Rush, LoW→Legend of War | ~1,200ms CPU / <15ms KV cache |
-| Nemotron 3.5 Lightning 30B (cloud) | 100% (thinking=off) | 100% | Partial (no LoW expansion) | ~750ms |
-| Stealth ox-alpha (cloud) | 100% | 100% | LoW→Legend of War | ~4,500ms |
-| Gemini 3.5 Flash Lite (cloud) | Includes timestamp echo | 100% | Partial | ~640ms |
+| Cerebras Qwen 3.8 27B (cloud) | 100% (thinking=off) | 100% | Partial (no LoW expansion) | **~260ms** (>1500 tok/s) |
+| Gemini 3.5 Flash Lite (cloud) | Includes timestamp echo | 100% | Partial | ~600ms |
+| InclusionAI Ling 3.0 Flash (cloud) | 100% (thinking=off) | 100% | Partial | ~750ms |
+| Liquid LFM 2.5 2.6B (cloud) | Inconsistent (reasoning spill) | 100% | None | ~2,300ms |
 
 Sample output (fine-tuned model):
 ```

@@ -8,6 +8,7 @@ Maintains system prompt prefix and multi-turn dialogue state in GPU VRAM across 
 import time
 import re
 import os
+import threading
 import torch
 from typing import Dict, Any, List, Optional, Tuple, AsyncGenerator
 from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
@@ -77,6 +78,9 @@ class SessionKVManager:
         torch_dtype = torch.float16 if "cuda" in device_str else torch.bfloat16
 
         self.sessions: Dict[str, SessionState] = {}
+        # FastAPI runs sync endpoints in a threadpool; concurrent forward passes on the
+        # shared model / one session's DynamicCache would corrupt the cache state.
+        self._decode_lock = threading.Lock()
 
         # Determine model path
         if model_path:
@@ -169,11 +173,24 @@ class SessionKVManager:
         print(f"--> [SessionKVManager] Created session '{session_id}' with {session.system_token_count} prefix tokens.")
         return session
 
+    def _evict_sessions(self):
+        """Drop idle sessions, then enforce the LRU cap. Only called before creating
+        a new session so the hot path stays lock-free of sweeps."""
+        now = time.time()
+        idle = [sid for sid, s in self.sessions.items()
+                if now - s.last_accessed > config.CACHE_IDLE_TIMEOUT_SECONDS]
+        for sid in idle:
+            del self.sessions[sid]
+        while len(self.sessions) >= config.MAX_ACTIVE_SESSIONS:
+            oldest = min(self.sessions.values(), key=lambda s: s.last_accessed)
+            del self.sessions[oldest.session_id]
+
     def get_or_create_session(self, session_id: str) -> SessionState:
-        if session_id in self.sessions:
-            session = self.sessions[session_id]
+        session = self.sessions.get(session_id)
+        if session is not None:
             session.last_accessed = time.time()
             return session
+        self._evict_sessions()
         return self.create_session(session_id)
 
     def parse_translation_output(self, generated_text: str) -> Tuple[str, Dict[str, str]]:
@@ -206,6 +223,18 @@ class SessionKVManager:
         message: str,
         max_new_tokens: int = 128
     ) -> Dict[str, Any]:
+        max_new_tokens = min(max_new_tokens, 128)
+        with self._decode_lock:
+            return self._process_turn_locked(session_id, username, timestamp, message, max_new_tokens)
+
+    def _process_turn_locked(
+        self,
+        session_id: str,
+        username: str,
+        timestamp: str,
+        message: str,
+        max_new_tokens: int = 128
+    ) -> Dict[str, Any]:
         t_start = time.time()
         session = self.get_or_create_session(session_id)
 
@@ -213,6 +242,11 @@ class SessionKVManager:
         user_turn_text = f"<|im_start|>user\n[{timestamp}] [{username}]: {message}<|im_end|>\n<|im_start|>assistant\n"
         input_ids = self.tokenizer.encode(user_turn_text, return_tensors="pt").to(self.device)
         num_prompt_tokens = input_ids.shape[1]
+
+        # Context overflow: reset the session instead of cropping the KV cache —
+        # cropping would misalign rotary positions for everything after the cut.
+        if session.past_key_values.get_seq_length() + num_prompt_tokens + max_new_tokens > config.MAX_SESSION_TOKENS:
+            session = self.create_session(session_id)
 
         cache = session.past_key_values
         generated_token_ids = []
@@ -271,6 +305,8 @@ class SessionKVManager:
         }
 
         session.message_history.append(turn_info)
+        if len(session.message_history) > 200:
+            session.message_history = session.message_history[-50:]
         return turn_info
 
     def reset_session(self, session_id: str) -> bool:

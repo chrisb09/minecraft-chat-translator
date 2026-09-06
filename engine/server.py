@@ -5,6 +5,7 @@ FastAPI REST & WebSocket server for Real-time Multi-Participant Chat Translation
 powered by Persistent GPU Session KV Cache Manager on AMD Vega 56.
 """
 
+import os
 import time
 from datetime import datetime
 from typing import Dict, Any, List, Optional
@@ -36,8 +37,11 @@ kv_manager: Optional[SessionKVManager] = None
 @app.on_event("startup")
 def startup_event():
     global kv_manager
-    print("--> [FastAPI] Initializing Session KV Manager on Vega 56...")
-    kv_manager = SessionKVManager()
+    # TRANSLATE_DEVICE defaults to "cpu": the ROCm torch build in the vega_torch env
+    # can still see the Vega 56, which the model must NOT use (GPU unstable on this host).
+    device = os.environ.get("TRANSLATE_DEVICE", "cpu")
+    print(f"--> [FastAPI] Initializing Session KV Manager on device '{device}'...")
+    kv_manager = SessionKVManager(device_override=device)
 
 
 class CreateSessionRequest(BaseModel):
@@ -72,7 +76,8 @@ class TranslateResponse(BaseModel):
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "gpu": "Vega 56 (ROCm FP16)"}
+    device = str(kv_manager.device) if kv_manager is not None else "not initialized"
+    return {"status": "ok", "device": device}
 
 
 @app.get("/stats")
@@ -108,13 +113,21 @@ def translate_message(req: TranslateMessageRequest):
 
     ts = req.timestamp or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    turn_info = kv_manager.process_turn(
-        session_id=req.session_id,
-        username=req.username,
-        timestamp=ts,
-        message=req.message,
-        max_new_tokens=req.max_new_tokens
-    )
+    try:
+        turn_info = kv_manager.process_turn(
+            session_id=req.session_id,
+            username=req.username,
+            timestamp=ts,
+            message=req.message,
+            max_new_tokens=req.max_new_tokens
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"translation failed: {e}")
+
+    # Protocol validation: callers (cinder) treat any non-200 as "backend failed"
+    # and fall back to DeepL/LibreTranslate, so reject malformed generations here.
+    if turn_info.get("src_lang", "unknown") in ("", "unknown") or not turn_info.get("translations"):
+        raise HTTPException(status_code=502, detail="model output failed protocol validation")
 
     return TranslateResponse(
         session_id=req.session_id,

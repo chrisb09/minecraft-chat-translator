@@ -5,9 +5,10 @@ compare_models.py
 Side-by-side comparative evaluation of Multi-Participant Chat Translation across:
 1. Base Untuned Qwen2.5-0.5B-Instruct (Local CPU)
 2. Fine-Tuned Qwen2.5-0.5B-Chat-Translator (Local CPU)
-3. nvidia/nemotron-3.5-lightning:free (OpenRouter, thinking disabled: reasoning.effort=none)
-4. stealth/ox-alpha (OpenRouter)
-5. gemini-3.5-flash-lite (Google AI Studio)
+3. Cerebras Qwen 3.8 27B (Cerebras Inference API, reasoning_effort=none, 5 RPM rate limited)
+4. Gemini 3.5 Flash Lite (Google AI Studio)
+5. InclusionAI Ling 3.0 Flash (OpenRouter: inclusionai/ling-3.0-flash-fin:free)
+6. Liquid LFM 2.5 2.6B (OpenRouter: liquid/lfm-2.5-2.6b:free)
 """
 
 import os
@@ -106,39 +107,29 @@ def run_local_model(model, tokenizer, input_text: str, device: torch.device) -> 
     return res, elapsed
 
 
-async def call_nemotron(client, input_text: str) -> Tuple[str, float]:
+_last_cerebras_call = 0.0
+
+async def call_cerebras(client, input_text: str) -> Tuple[str, float]:
+    global _last_cerebras_call
+    # Strict 5 RPM rate limit = minimum 12.5 seconds between requests
+    now = time.time()
+    wait_time = 12.5 - (now - _last_cerebras_call)
+    if _last_cerebras_call > 0 and wait_time > 0:
+        print(f"    [Cerebras Rate Limiter: Waiting {wait_time:.1f}s to respect 5 RPM limit...]")
+        await asyncio.sleep(wait_time)
+
     t0 = time.time()
+    _last_cerebras_call = time.time()
     try:
         response = await client.chat.completions.create(
-            model="nvidia/nemotron-3.5-lightning:free",
+            model="qwen-3.8-27b",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": input_text}
             ],
             temperature=0.1,
             max_tokens=200,
-            extra_body={"reasoning": {"effort": "none"}}
-        )
-        elapsed = (time.time() - t0) * 1000
-        msg = response.choices[0].message
-        content = msg.content or (msg.reasoning if hasattr(msg, "reasoning") else "")
-        return clean_output(content), elapsed
-    except Exception as e:
-        elapsed = (time.time() - t0) * 1000
-        return f"[ERROR: {e}]", elapsed
-
-
-async def call_ox_alpha(client, input_text: str) -> Tuple[str, float]:
-    t0 = time.time()
-    try:
-        response = await client.chat.completions.create(
-            model="stealth/ox-alpha",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": input_text}
-            ],
-            temperature=0.1,
-            max_tokens=300
+            extra_body={"reasoning_effort": "none"}
         )
         elapsed = (time.time() - t0) * 1000
         msg = response.choices[0].message
@@ -169,6 +160,49 @@ async def call_gemini(client, model_name: str, input_text: str) -> Tuple[str, fl
         return f"[ERROR: {e}]", elapsed
 
 
+async def call_ling_flash(client, input_text: str) -> Tuple[str, float]:
+    t0 = time.time()
+    try:
+        response = await client.chat.completions.create(
+            model="inclusionai/ling-3.0-flash-fin:free",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": input_text}
+            ],
+            temperature=0.1,
+            max_tokens=200,
+            extra_body={"reasoning": {"effort": "none"}}
+        )
+        elapsed = (time.time() - t0) * 1000
+        msg = response.choices[0].message
+        content = msg.content or (msg.reasoning if hasattr(msg, "reasoning") else "")
+        return clean_output(content), elapsed
+    except Exception as e:
+        elapsed = (time.time() - t0) * 1000
+        return f"[ERROR: {e}]", elapsed
+
+
+async def call_liquid_lfm(client, input_text: str) -> Tuple[str, float]:
+    t0 = time.time()
+    try:
+        response = await client.chat.completions.create(
+            model="liquid/lfm-2.5-2.6b:free",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": input_text}
+            ],
+            temperature=0.1,
+            max_tokens=600
+        )
+        elapsed = (time.time() - t0) * 1000
+        msg = response.choices[0].message
+        content = msg.content or (msg.reasoning if hasattr(msg, "reasoning") else "")
+        return clean_output(content), elapsed
+    except Exception as e:
+        elapsed = (time.time() - t0) * 1000
+        return f"[ERROR: {e}]", elapsed
+
+
 async def main():
     print("===================================================================================================")
     print("           Multi-Model Comparative Translation Benchmark                                           ")
@@ -178,13 +212,13 @@ async def main():
     print(f"--> Local Compute Device: {device}\n")
 
     # 1. Load Base Untuned Model
-    print(f"--> [1/4] Loading Base Untuned Model: {BASE_MODEL_ID}...")
+    print(f"--> [1/2] Loading Base Untuned Model: {BASE_MODEL_ID}...")
     base_tok = AutoTokenizer.from_pretrained(BASE_MODEL_ID)
     base_model = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, torch_dtype=torch.bfloat16).to(device)
     base_model.eval()
 
     # 2. Load Fine-Tuned Model
-    print(f"--> [2/4] Loading Fine-Tuned Model: {FINETUNED_MODEL_DIR}...")
+    print(f"--> [2/2] Loading Fine-Tuned Model: {FINETUNED_MODEL_DIR}...")
     ft_tok = AutoTokenizer.from_pretrained(FINETUNED_MODEL_DIR)
     ft_model = AutoModelForCausalLM.from_pretrained(FINETUNED_MODEL_DIR, torch_dtype=torch.bfloat16).to(device)
     ft_model.eval()
@@ -198,6 +232,10 @@ async def main():
     gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEYS", "").split(",")[0].strip()
     from google import genai
     gem_client = genai.Client(api_key=gemini_key) if gemini_key else None
+
+    # 5. Cerebras Client
+    cerebras_key = os.environ.get("CEREBRAS_API_KEY", "").strip()
+    cerebras_client = AsyncOpenAI(base_url="https://api.cerebras.ai/v1", api_key=cerebras_key) if cerebras_key else None
 
     print("--> All models initialized! Running test cases...\n")
 
@@ -214,20 +252,25 @@ async def main():
         # 2. Fine-Tuned Model
         ft_out, ft_ms = run_local_model(ft_model, ft_tok, case['input'], device)
 
-        # 3. Nemotron 3.5 Lightning (thinking disabled)
-        nemotron_out, nemotron_ms = ("[OpenRouter key missing]", 0)
-        if or_client:
-            nemotron_out, nemotron_ms = await call_nemotron(or_client, case['input'])
+        # 3. Cerebras Qwen 3.8 27B
+        cerebras_out, cerebras_ms = ("[Cerebras key missing]", 0)
+        if cerebras_client:
+            cerebras_out, cerebras_ms = await call_cerebras(cerebras_client, case['input'])
 
-        # 4. Stealth ox-alpha
-        ox_out, ox_ms = ("[OpenRouter key missing]", 0)
-        if or_client:
-            ox_out, ox_ms = await call_ox_alpha(or_client, case['input'])
-
-        # 5. Gemini 3.5 Flash Lite
+        # 4. Gemini 3.5 Flash Lite
         gem_out, gem_ms = ("[Gemini key missing]", 0)
         if gem_client:
             gem_out, gem_ms = await call_gemini(gem_client, "gemini-3.5-flash-lite", case['input'])
+
+        # 5. InclusionAI Ling 3.0 Flash
+        ling_out, ling_ms = ("[OpenRouter key missing]", 0)
+        if or_client:
+            ling_out, ling_ms = await call_ling_flash(or_client, case['input'])
+
+        # 6. Liquid LFM 2.5 2.6B
+        liquid_out, liquid_ms = ("[OpenRouter key missing]", 0)
+        if or_client:
+            liquid_out, liquid_ms = await call_liquid_lfm(or_client, case['input'])
 
         print(f"[1. Base Untuned Qwen 0.5B] ({base_ms:.0f}ms):")
         print(f"{base_out}\n")
@@ -235,14 +278,17 @@ async def main():
         print(f"[2. Fine-Tuned Qwen 0.5B] ({ft_ms:.0f}ms):")
         print(f"{ft_out}\n")
 
-        print(f"[3. Nemotron 3.5 Lightning (Reasoning Effort=None)] ({nemotron_ms:.0f}ms):")
-        print(f"{nemotron_out}\n")
+        print(f"[3. Cerebras Qwen 3.8 27B (Rate Limited 5 RPM)] ({cerebras_ms:.0f}ms):")
+        print(f"{cerebras_out}\n")
 
-        print(f"[4. Stealth ox-alpha (Cloud)] ({ox_ms:.0f}ms):")
-        print(f"{ox_out}\n")
-
-        print(f"[5. Gemini 3.5 Flash Lite (Cloud)] ({gem_ms:.0f}ms):")
+        print(f"[4. Gemini 3.5 Flash Lite (Cloud)] ({gem_ms:.0f}ms):")
         print(f"{gem_out}\n")
+
+        print(f"[5. InclusionAI Ling 3.0 Flash (OpenRouter)] ({ling_ms:.0f}ms):")
+        print(f"{ling_out}\n")
+
+        print(f"[6. Liquid LFM 2.5 2.6B (OpenRouter)] ({liquid_ms:.0f}ms):")
+        print(f"{liquid_out}\n")
 
     print("=" * 100)
     print("Benchmark Comparison Complete.")

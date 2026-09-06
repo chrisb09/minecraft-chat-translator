@@ -1,0 +1,17 @@
+[Unit]
+Description=Finetuned Qwen chat translation engine (FastAPI, CPU-only)
+After=network.target
+
+[Service]
+User=christian
+WorkingDirectory=/git/finetune
+Environment=PYTHONUNBUFFERED=1
+# The ROCm torch build can see the Vega 56, but the GPU is unstable on this
+# host — force CPU inference (bf16, AVX-512).
+Environment=TRANSLATE_DEVICE=cpu
+ExecStart=/home/christian/miniforge3/envs/vega_torch/bin/python -m uvicorn engine.server:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
